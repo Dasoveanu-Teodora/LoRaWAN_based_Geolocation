@@ -34,10 +34,9 @@
 // References:
 // [feather] adafruit-feather-m0-radio-with-lora-module.pdf
 
-#include <lmic.h>
-#include <hal/hal.h>
-#include <SPI.h>
-#include "lora.h"
+#include "loraMAC.h"
+#include <CayenneLPP.h>
+#include "gps.h"
 
 //
 // For normal use, we require that you edit the sketch to replace FILLMEIN
@@ -74,12 +73,24 @@ void os_getArtEui(u1_t *buf) {}
 void os_getDevEui(u1_t *buf) {}
 void os_getDevKey(u1_t *buf) {}
 
-static uint8_t mydata[] = "Hello, world!";
+ //uint8_t mydata[] = "Hello, world!";
+#if defined(PAYLOAD_USE_FULL)
+  // includes number of satellites and accuracy
+  uint8_t gps_data[10];
+#elif defined(PAYLOAD_USE_CAYENNE)
+  // CAYENNE DF
+  static uint8_t gps_data[11] = {0x03, 0x88, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00};
+#endif
+
+ uint8_t gps_data_size;
+ bool gps_confirmed;
+ uint8_t gps_port;
+int i;
 static osjob_t sendjob;
 
 // Schedule TX every this many seconds (might become longer due to duty
 // cycle limitations).
-const unsigned TX_INTERVAL = 60;
+const unsigned TX_INTERVAL = 40;
 
 // Pin mapping
 // Adapted for Feather M0 per p.10 of [feather]
@@ -90,12 +101,64 @@ const lmic_pinmap lmic_pins = {
         .dio = {6, 5, LMIC_UNUSED_PIN}, // assumes external jumpers [feather_lora_jumper] */
     // DIO1 is on JP1-1: is io1 - we connect to GPO6
     // DIO1 is on JP5-3: is D2 - we connect to GPO5
-    .nss = PB12,
+    .nss = LORA_NSS,
     .rxtx = LMIC_UNUSED_PIN,
-    .rst = PB10,
-    .dio = {PB11, PC13, PB9},
+    .rst = LORA_RST,
+    .dio = {LORA_DIO0, LORA_DIO1_PIN, LORA_DIO2_PIN},
 
 };
+
+void do_send(osjob_t *j)
+{
+    // Check if there is not a current TX/RX job running
+    if (LMIC.opmode & OP_TXRXPEND)
+    {
+        Serial.println(F("OP_TXRXPEND, not sending"));
+    }
+    else
+    {
+
+        Serial.println(F("OP_TXRXPEND,sending ..."));
+
+
+        LMIC_setTxData2(gps_port, gps_data, gps_data_size, gps_confirmed );
+
+        
+        os_setTimedCallback(&sendjob, os_getTime() + sec2osticks(TX_INTERVAL), do_send);
+    }
+    // Next TX is scheduled after TX_COMPLETE event.
+}
+
+ 
+void loraMAC_send(uint8_t * data, uint8_t data_size, uint8_t port, bool confirmed){
+   
+   
+   Serial.println("LORA mac send  ");
+   Serial.println("data_size  ");
+   Serial.println(data_size);
+
+   for(i=0; i < data_size;i++)
+   { 
+     gps_data[i] = data[i];
+      
+    Serial.println(i);
+    Serial.println( gps_data[i]);
+ 
+  }
+  
+
+
+  gps_data_size = data_size;
+  gps_confirmed = confirmed ? 1 : 0;
+  gps_port = port;
+
+  do_send(&sendjob);
+
+  
+
+}
+
+
 
 void onEvent(ev_t ev)
 {
@@ -137,6 +200,8 @@ void onEvent(ev_t ev)
         break;
     case EV_TXCOMPLETE:
         Serial.println(F("EV_TXCOMPLETE (includes waiting for RX windows)"));
+         Serial.println("data len lmic ");
+        Serial.println(LMIC.dataLen);
         if (LMIC.txrxFlags & TXRX_ACK)
             Serial.println(F("Received ack"));
         if (LMIC.dataLen)
@@ -146,7 +211,7 @@ void onEvent(ev_t ev)
             Serial.println(F(" bytes of payload"));
         }
         // Schedule next transmission
-        os_setTimedCallback(&sendjob, os_getTime() + sec2osticks(TX_INTERVAL), do_send);
+        os_setTimedCallback(&sendjob, os_getTime() + sec2osticks(TX_INTERVAL),  do_send);
         break;
     case EV_LOST_TSYNC:
         Serial.println(F("EV_LOST_TSYNC"));
@@ -191,25 +256,9 @@ void onEvent(ev_t ev)
     }
 }
 
-void do_send(osjob_t *j)
+void  loraMAC_setup()
 {
-    // Check if there is not a current TX/RX job running
-    if (LMIC.opmode & OP_TXRXPEND)
-    {
-        Serial.println(F("OP_TXRXPEND, not sending"));
-    }
-    else
-    {
-        // Prepare upstream data transmission at the next possible time.
-        LMIC_setTxData2(1, mydata, sizeof(mydata) - 1, 0);
-        Serial.println(F("Packet queued"));
-    }
-    // Next TX is scheduled after TX_COMPLETE event.
-}
-
-void setup_lora()
-{
-    
+  
 
 #ifdef VCC_ENABLE
     // For Pinoccio Scout boards
@@ -217,9 +266,9 @@ void setup_lora()
     digitalWrite(VCC_ENABLE, HIGH);
     delay(1000);
 #endif
-    SPI.setMISO(PB14);
-    SPI.setMOSI(PB15);
-    SPI.setSCLK(PB13);
+    SPI.setMISO(LORA_MISO);
+    SPI.setMOSI(LORA_MOSI);
+    SPI.setSCLK(LORA_SCK);
     // Slave Select pin is driven by RF driver
 
     SPI.begin();
@@ -316,18 +365,41 @@ void setup_lora()
     do_send(&sendjob);
 }
 
-void loop_lora()
+void loraMAC_loop()
 {
-    unsigned long now;
-    now = millis();
-    if ((now & 512) != 0)
-    {
-        // digitalWrite(13, HIGH);
-    }
-    else
-    {
-        // digitalWrite(13, LOW);
-    }
+    // unsigned long now;
+    // now = millis();
+    // if ((now & 512) != 0)
+    // {
+    //     // digitalWrite(13, HIGH);
+    // }
+    // else
+    // {
+    //     // digitalWrite(13, LOW);
+    // }
 
     os_runloop_once();
 }
+
+
+// void lora_mac__send(uint8_t * data, uint8_t data_size, uint8_t port, bool confirmed){
+
+ 
+//  // Check if there is not a current TX/RX job running
+//     if (LMIC.opmode & OP_TXRXPEND)
+//     {
+//         Serial.println(F("OP_TXRXPEND, not sending"));
+//     }
+//     else
+//     {
+//         // Prepare upstream data transmission at the next possible time.
+//        // LMIC_setTxData2(1, mydata, sizeof(mydata) - 1, 0);
+//        // Prepare upstream data transmission at the next possible time.
+   
+//         LMIC_setTxData2(port, data, data_size,  0);
+//         Serial.println(F("Packet gps data queued"));
+//     }
+
+
+// }
+
